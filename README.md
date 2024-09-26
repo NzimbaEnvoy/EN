@@ -1,6 +1,6 @@
 # Project Title
 
-This project is about Recommedner System.
+This project is about Recommender System.
 
 ## Website Link
 
