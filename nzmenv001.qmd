@@ -1,0 +1,773 @@
+---
+title: "DATA SCIENCE FOR INDUSTRY ASSIGNMENT 1"
+author: "Envoy Nzimba (NZMENV001)"
+date: "2024-09-25"
+format: 
+  html:
+    toc: true   
+    page-layout: full
+    embed-resources: true
+    toc-depth: 2      
+    number_sections: true  
+    includes:
+      in_header: header.tex 
+bibliography: references.bib
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(warning = FALSE)
+knitr::opts_chunk$set(message = FALSE, warning = FALSE)
+```
+
+\newpage
+
+# PLAGIARISM DECLARATION
+
+I, Envoy Nzimba , hereby declare that the work on which this assignment is based on my original work (except where acknowledgements indicate otherwise) and that neither the whole work nor any part of it has been, is being, or is to be submitted for another degree in this or any other university. I authorise the University to reproduce for the purpose of research either the whole or any portion of the contents in any manner whatsoever.
+
+\*\*Signature:\*\* Envoy Nzimba \*\*Date:\*\* 25 September 2024
+
+\newpage
+
+# BUILDING RECOMMENDER SYSTEM
+
+## **INTRODUCTION**
+
+The primary objective of this assignment is to develop a recommender system that can predict book ratings for both existing and new users, effectively addressing the cold-start problem by assuming new users will rate a small number of books upon joining the platform. The system will integrate three distinct approaches: item-based collaborative filtering (CF), user-based CF, and matrix factorization. By combining these methods into an ensemble, the aim is to leverage their individual strengths and ultimately achieving a more robust and accurate recommendation system. The assignment will detail the exploratory data analysis conducted to understand the dataset, the methodologies used to build the recommender systems and evaluating metrics used to assess the performance.
+
+```{r, echo=FALSE, message=FALSE}
+# Loading libraries
+library(tidyverse)
+library(stringr)
+library(ggplot2)
+library(data.table)
+library(reshape2)
+library(recosystem)
+library(DT)
+library(knitr)
+library(kableExtra)
+
+
+```
+
+# EXPLORATORY DATA ANALYSIS
+
+## **Loading data**
+
+There are three datasets, namely Books, Ratings, and Users. The data was loaded, and appropriate joins were performed to create a combined dataset. Combining the datasets is essential as it consolidates relevant information from each source, allowing for a more comprehensive analysis. This approach ensures that user preferences, book details, and rating data are all available in a single structure, facilitating better feature extraction and improving the quality of recommendations.
+
+```{r echo=FALSE}
+#Reading the data
+Books <- read.csv("Books.csv")
+
+Ratings <- read.csv("Ratings.csv")
+
+Users <- read.csv("Users.csv")
+
+```
+
+```{r echo=FALSE, message=FALSE}
+#Joining the data
+book <- Books %>% mutate(Book_Title=paste(Book.Title,",",Year.Of.Publication)) %>% 
+  select(c(1,9))
+
+
+Combined_data <- full_join(full_join(Users,Ratings),book)
+
+final_book_df <- Combined_data %>%select(c(1,4,6,5)) %>% na.omit()
+
+```
+
+## **Distribution of ratings**
+
+A significant number of ratings are zeros as shown in the distribution below, which may suggest that users have read the book but did not provide a rating..
+
+```{r echo=FALSE}
+# Plotting distribution of ratings
+ggplot(final_book_df, aes(x = Book.Rating)) +
+  geom_bar(fill = "skyblue", color = "black") +
+  labs(title = "Distribution of Book Ratings", x = "Rating", y = "Count") +
+  theme_minimal()
+
+```
+
+Books with zero ratings do not provide any feedback from users. Since recommendation systems rely heavily on user-item interactions (such as ratings), items with no ratings cannot help the model learn meaningful patterns or preferences. Including them in the model would not contribute to making useful predictions. Therefore, removing these books ensures that the model focuses only on books that have been rated, leading to cleaner data and potentially more accurate recommendations. Below is the distribution of book ratings after removing books with zero ratings.
+
+```{r echo=FALSE}
+# Filtering out books with zero ratings
+filtered_book_df <- final_book_df %>% 
+  filter(Book.Rating != 0)
+
+```
+
+```{r echo=FALSE}
+# Plotting distribution of ratings
+ggplot(filtered_book_df, aes(x = Book.Rating)) +
+  geom_bar(fill = "skyblue", color = "black") +
+  labs(title = "Distribution of Book Ratings", x = "Rating", y = "Count") +
+  theme_minimal()
+```
+
+## **Top Ten rated books**
+
+An analysis of the top 10 rated books shows that, on average, these books have received over 300 ratings each. This indicates their broad popularity and engagement among users. Books with a high number of ratings tend to be well-known, widely circulated and potentially influenced in shaping reading trends within the dataset.
+
+```{r echo=FALSE}
+# Top 10 most rated books
+top_rated_books <- filtered_book_df %>%
+  group_by(ISBN) %>%
+  summarise(Count = n(), Avg_Rating = mean(Book.Rating)) %>%
+  arrange(desc(Count)) %>%
+  head(10)
+
+# Plotting the top 10 most rated books
+ggplot(top_rated_books, aes(x = reorder(ISBN, -Count), y = Count)) +
+  geom_bar(stat = "identity", fill = "coral", color = "black") +
+  labs(title = "Top 10 Most Rated Books", x = "Book", y = "Number of Ratings") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+## **Creating Subset data to work with**
+
+Working with a large dataset where many users or items have minimal ratings can significantly increase computational complexity. To enhance the effectiveness and reliability of the recommendations system, specific refinements were made to the dataset. These refinements includes selecting users with more than 300 ratings and books that received more than 200 ratings. By selecting users who have provided more than 300 ratings, the analysis prioritizes those who are highly engaged with the system. Filtering books with high ratings ensures that the recommender system is based on books with significant feedback. The filtered data is shown in the table below.
+
+```{r echo=FALSE}
+# Counting the number of ratings per user
+user_counts <- filtered_book_df %>%
+  group_by(User.ID) %>%
+  summarise(num_ratings = n()) %>% arrange(desc(num_ratings))
+
+# Counting the number of ratings per book
+book_counts <- filtered_book_df %>%
+  group_by(ISBN) %>%
+  summarise(num_ratings = n()) %>% arrange(desc(num_ratings))
+```
+
+```{r echo=FALSE}
+#Filtering Users and Books
+# Filtering users with more than 300 ratings
+active_users <- user_counts %>%
+  filter(num_ratings > 300) %>%
+  select(User.ID)
+
+# Filtering books with more than 200 ratings
+popular_books <- book_counts %>%
+  filter(num_ratings > 200) %>%
+  select(ISBN)
+```
+
+```{r echo=FALSE}
+# Filtering the original dataset
+filtered_book_df <- filtered_book_df %>%
+  semi_join(active_users, by = "User.ID") %>%
+  semi_join(popular_books, by = "ISBN")
+
+# Showing the first 5 rows and the first 5 columns
+kable(filtered_book_df[1:5, 1:4], caption = "Filtered Data")
+
+```
+
+# **BOOK RECOMMENDATIONS SYSTEMS**
+
+## **1. USER-BASED COLLABORATIVE FILTERING**
+
+User-based collaborative filtering predicts a user's preferences by finding other users with similar tastes and recommending items that those similar users have liked @schafer2007 . Firstly, the dataset was transformed into matrix format. This matrix facilitates the representation of user preferences for various books, where rows correspond to users, columns correspond to books and the entries indicate the ratings given by users. The reason of doing this is because it becomes possible to apply collaborative filtering techniques for recommendation and analyze user preferences and behaviors more effectively.
+
+```{r echo=FALSE}
+# Converting data frame to data.table
+dt <- as.data.table(filtered_book_df)
+
+# Creating user-item matrix using dcast from data.table
+user_item_matrix <- dcast(dt, User.ID ~ ISBN, value.var = "Book.Rating", fill = 0)
+user
+```
+
+### **Model function**
+
+A cosine similarity function is used to measure how similar two users are based on their rating patterns @schafer2007 . The dataset was transformed into a matrix where rows represent users, column represents books, and entries are ratings. The cosines similarity between the target user and all other users was computed to find those with similar rating patterns. Books that the target user has not yet read but have been highly rated by similar user are recommended.
+
+```{r echo=FALSE}
+
+# Cosine Similarity Function
+cos_similarity <- function(x, y) {
+  sum(x * y, na.rm = TRUE) / (sqrt(sum(x^2, na.rm = TRUE)) * sqrt(sum(y^2, na.rm = TRUE)))
+}
+
+# Function definition
+user_recommendation <- function(user_id, dataset, n_recommendations = 5, nearest_neighbors = 10, threshold = 1) {
+  
+  # Ensure Book.Rating is numeric
+  dataset <- dataset %>%
+    mutate(Book.Rating = as.numeric(Book.Rating))
+  
+  # Creating a user-item matrix from the dataset using dcast (replace NA with 0)
+  user_item_matrix <- dcast(dataset, User.ID ~ ISBN, value.var = "Book.Rating", fill = 0) %>%
+    column_to_rownames(var = "User.ID") %>%
+    as.matrix()
+  
+  # Computing similarity for each user using cosine similarity
+  user_index <- which(rownames(user_item_matrix) == user_id)
+  
+  if (length(user_index) == 0) {
+    stop("User ID not found in the dataset")
+  }
+  
+  similarity <- apply(user_item_matrix, 1, FUN = function(y) cos_similarity(user_item_matrix[user_index, ], y))
+  
+  # Getting top N similar users
+  similar_users <- tibble(User.ID = rownames(user_item_matrix), similarity = similarity) %>%
+    filter(User.ID != user_id) %>%
+    arrange(desc(similarity)) %>%
+    top_n(nearest_neighbors, similarity)
+  
+  # Books the current user has already read
+  readed_books_user <- dataset %>%
+    filter(User.ID == user_id) %>%
+    pull(ISBN)
+  
+  # Getting recommendations from similar users' data
+  recommendations <- dataset %>%
+    filter(User.ID %in% similar_users$User.ID & !(ISBN %in% readed_books_user)) %>%
+    group_by(ISBN) %>%
+    summarise(count = n(), avg_rating = mean(Book.Rating, na.rm = TRUE)) %>%
+    filter(count > threshold) %>%
+    arrange(desc(avg_rating), desc(count)) %>%
+    head(n_recommendations)
+  
+  return(recommendations)
+}
+```
+
+### **Recommending Existing Users**
+
+The recommendation system produced a list of the top 5 book recommendations for the user with ID "11676". This output suggests that the recommended books are well-regarded by similar users, with the highest-rated books being more likely to align with the user's preferences.
+
+```{r echo=FALSE}
+# Example call to the function
+existing_user_recommendations <- user_recommendation(
+  user_id = "11676", 
+  dataset = filtered_book_df,  # Pass your dataset here
+  n_recommendations = 5
+)
+
+# Printing the recommendations
+kable(existing_user_recommendations, caption = "Existing User Recommendations")
+
+```
+
+### **Recommending New Users**
+
+The recommendations reflect books that are generally well-rated by users with similar preferences, providing a curated list that aligns with the new user's rating patterns. The input consisted of ratings for five books, with scores ranging from 2 to 5. Using these ratings, the recommendation function produces a list of books with their respective average ratings. The table below shows books recommended to a new user based on the preferences of other users who are similar to them. Books with higher average ratings (like ISBN="`0312195516"` with a rating of 4.6) are recommended more strongly because the model predicts the user would rate them higher.
+
+```{r echo=FALSE}
+# Cosine similarity function
+cos_similarity <- function(v1, v2) {
+  norm_v1 <- sqrt(sum(v1^2))
+  norm_v2 <- sqrt(sum(v2^2))
+  if (norm_v1 == 0 || norm_v2 == 0) {
+    return(0)  # Handle zero vector case
+  }
+  sum(v1 * v2) / (norm_v1 * norm_v2)
+}
+
+# Function to provide recommendations for new users
+new_user_recommendation <- function(new_user_ratings, user_item_matrix, n_recommendations = 5, nearest_neighbors = 10) {
+  # Creating a temporary user-item matrix with the new user
+  temp_user_item_matrix <- rbind(user_item_matrix, rep(0, ncol(user_item_matrix)))
+  rownames(temp_user_item_matrix)[nrow(temp_user_item_matrix)] <- "new_user"
+  colnames(temp_user_item_matrix) <- colnames(user_item_matrix)
+  
+  # Adding new user ratings
+  temp_user_item_matrix["new_user", names(new_user_ratings)] <- new_user_ratings
+  
+  # Computing similarity between the new user and all existing users
+  new_user_vector <- temp_user_item_matrix["new_user", ]
+  similarity_scores <- apply(user_item_matrix, 1, function(x) cos_similarity(new_user_vector, x))
+  
+  # Getting the most similar users
+  similar_users <- tibble(User.ID = rownames(user_item_matrix), similarity = similarity_scores) %>%
+    arrange(desc(similarity)) %>%
+    filter(User.ID != "new_user") %>%
+    head(nearest_neighbors)
+  
+  # Books the new user has already rated
+  readed_books_user <- names(new_user_ratings)
+  
+  # Getting recommendations from similar users' data
+  recommendations <- user_item_matrix %>%
+    as.data.frame() %>%
+    mutate(User.ID = rownames(.)) %>%
+    filter(User.ID %in% similar_users$User.ID) %>%
+    gather(key = "ISBN", value = "Rating", -User.ID) %>%
+    filter(!ISBN %in% readed_books_user) %>%
+    group_by(ISBN) %>%
+    summarise(avg_rating = mean(Rating, na.rm = TRUE)) %>%
+    arrange(desc(avg_rating)) %>%
+    head(n_recommendations)
+  
+  return(recommendations)
+}
+
+# Replacing this with your real data
+new_user_ratings <- c("Book1" = 5, "Book2" = 3, "Book3" = 4, "Book4" = 2, "Book5" = 4)
+
+# Getting recommendations
+new_user_recommendations <- new_user_recommendation(new_user_ratings, user_item_matrix, n_recommendations = 5)
+kable(new_user_recommendations, caption = "New User Recommendations")
+
+```
+
+## **2. ITEM-BASED COLLABORATIVE FILTERING**
+
+The item-based recommendation focuses on the relationship between items rather than users @ekstrand2011 . Unlike user-based collaborative filtering, which calculates the similarity between users, item-based collaborative filtering measures the similarity between items. Below is the item user matrix used.
+
+```{r echo=FALSE}
+dt_item <- as.data.table(filtered_book_df)
+
+# Creating user-item matrix using dcast from data.table
+item_user_matrix <- dcast(dt_item, ISBN~User.ID, value.var = "Book.Rating", fill = 0)
+
+# Ensuring ISBN is set as row names
+item_user_matrix <- as.data.frame(item_user_matrix)
+row.names(item_user_matrix) <- item_user_matrix$ISBN
+item_user_matrix$ISBN <- NULL
+
+# Converting to matrix
+item_user_matrix <- as.matrix(item_user_matrix)
+kable(item_user_matrix[1:8, 1:8],caption = "Item-User Matrix")
+
+
+```
+
+### **Model function**
+
+The model implementation includes a function to compute cosine similarity between book rating vectors and another function to generate recommendations based on the similarity of a specified book to all other books. The recommendation function identifies and ranks books similar to the given book, providing a list of the top recommendations based on similarity scores.
+
+```{r echo=FALSE}
+# Define cosine similarity function
+cos_similarity <- function(A, B) {
+  num <- sum(A * B, na.rm = TRUE)
+  den <- sqrt(sum(A^2, na.rm = TRUE)) * sqrt(sum(B^2, na.rm = TRUE))
+  result <- num / den
+  return(result)
+}
+# Defining item recommendation function
+item_recommendation <- function(book_id, rating_matrix, n_recommendations = 5) {
+  # Converting book_id and rownames to character for comparison
+  book_id <- as.character(book_id)
+  rownames(rating_matrix) <- as.character(rownames(rating_matrix))
+  
+  # Checking if book_id is in the row names
+  if (!(book_id %in% rownames(rating_matrix))) {
+    stop("Book ID not found in the rating matrix")
+  }
+  
+  # Getting the index of the book
+  book_index <- which(rownames(rating_matrix) == book_id)
+  
+  # Extracting the vector for the book
+  book_vector <- rating_matrix[book_index, ]
+  
+  # Computing similarity between the specified book and all other books
+  similarity <- apply(rating_matrix, 1, function(row) cos_similarity(book_vector, row))
+  
+  recommendations <- tibble(ISBN = rownames(rating_matrix),
+                             similarity = similarity) %>%
+    filter(ISBN != book_id) %>%
+    arrange(desc(similarity)) %>%
+    head(n_recommendations)
+  
+  return(recommendations)
+}
+```
+
+### **Recommending Existing Users**
+
+In testing the recommender system, a book with the ID "0312195516" was selected for evaluation. Using the item-based collaborative filtering approach, recommendations were generated based on the similarity of this book to other books in the dataset. The top five recommended books, along with their similarity scores, were identified
+
+```{r echo=FALSE}
+# Testing the recommender system
+book_id_to_check <- "0156027321"  # The Book user 11676 has subscribed
+
+# Perform recommendation
+recom_cf_item <- item_recommendation(book_id = book_id_to_check, rating_matrix = item_user_matrix, n_recommendations = 5)
+
+kable(recom_cf_item,caption = "Existing Users Recommendation")
+```
+
+**Visualizing recommended books**
+
+These recommendations highlight books that are most similar to the specified book, providing relevant suggestions based on item-based collaborative filtering.
+
+```{r echo=FALSE}
+# Joining the recommendations with book information
+recom_cf_item <- recom_cf_item %>%
+  left_join(filtered_book_df, by = "ISBN")
+
+# Visualizing recommendations
+visualizar_recomendacion <- function(data) {
+  ggplot(data, aes(x = reorder(Book_Title, similarity), y = similarity, fill = similarity)) +
+    geom_bar(stat = "identity") +
+    coord_flip() +
+    theme_minimal() +
+    labs(title = "Recommended Books", x = "Book Title", y = "Similarity") +
+    scale_fill_gradient(low = "blue", high = "red")  # Customize color scale as needed
+}
+# Calling the visualization function
+visualizar_recomendacion(recom_cf_item)
+```
+
+### **Recommending New Users**
+
+A new user's ratings were used to generate book recommendations. Recommendations were generated by computing the similarity between the new user's ratings and all other items in the matrix, excluding books the new user has already rated. The top recommended books were then identified based on similarity scores.
+
+```{r echo=FALSE}
+# Cosine Similarity Function
+cos_similarity <- function(A, B) {
+  num <- sum(A * B, na.rm = TRUE)
+  den <- sqrt(sum(A^2, na.rm = TRUE)) * sqrt(sum(B^2, na.rm = TRUE))
+  result <- ifelse(den == 0, 0, num / den)
+  return(result)
+}
+
+# Function to Add New User's Ratings to User-Item Matrix
+add_new_user <- function(new_user_ratings, item_user_matrix) {
+  # Creating a new vector for the user with zeros for unrated books
+  new_user_vector <- rep(0, ncol(item_user_matrix))
+  
+  # Adding new user's ratings where applicable
+  for (book in names(new_user_ratings)) {
+    if (book %in% rownames(item_user_matrix)) {
+      new_user_vector[which(rownames(item_user_matrix) == book)] <- new_user_ratings[book]
+    }
+  }
+  
+  # Adding new user to the matrix as the last row
+  item_user_matrix <- rbind(item_user_matrix, new_user_vector)
+  rownames(item_user_matrix)[nrow(item_user_matrix)] <- "new_user"
+  
+  return(item_user_matrix)
+}
+
+# Item Recommendation Function for the New User
+new_user_recommendation <- function(new_user_ratings, rating_matrix, n_recommendations = 5) {
+  # Add the new user's ratings to the matrix
+  rating_matrix <- add_new_user(new_user_ratings, rating_matrix)
+  
+  # Extracting the new user's vector (the last row in the matrix)
+  new_user_vector <- rating_matrix["new_user", ]
+  
+  # Calculating similarity between new user and all other books
+  similarity <- apply(rating_matrix[-nrow(rating_matrix), ], 1, function(row) cos_similarity(new_user_vector, row))
+  
+  # Filtering out books the new user has already rated
+  unrated_books <- setdiff(rownames(rating_matrix)[-nrow(rating_matrix)], names(new_user_ratings))
+  
+  # Creating a recommendation list from the unrated books based on similarity
+  recommendations <- tibble(ISBN = unrated_books,
+                             similarity = similarity[unrated_books]) %>%
+    arrange(desc(similarity)) %>%
+    head(n_recommendations)
+  
+  return(recommendations)
+}
+
+```
+
+```{r echo=FALSE}
+# Example: New User Ratings for 5 Books
+new_user_ratings <- c(
+  "0312195516" = 5,  # First book
+  "044023722X" = 4,  # Second book
+  "0451167716" = 3,  # Third book
+  "0553573403" = 4,  # Fourth book
+  "0142000671" = 2   # Fifth book
+)
+# Getting recommendations for the new user
+new_user_recommendations <- new_user_recommendation(new_user_ratings, item_user_matrix, n_recommendations = 5)
+ kable(new_user_recommendations,caption = "New Users Recommendation")
+
+
+
+```
+
+These recommendations represent books that are most similar to those rated by the new user, providing relevant suggestions based on the item-based collaborative filtering approach.
+
+```{r echo=FALSE}
+# Joining the recommendations with book information
+new_user_recommendations <- new_user_recommendations %>%
+  left_join(filtered_book_df, by = "ISBN")
+# Visualizing the recommendations
+visualizar_recomendacion <- function(data) {
+  ggplot(data, aes(x = reorder(Book_Title, similarity), y = similarity, fill = similarity)) +
+    geom_bar(stat = "identity") +
+    coord_flip() +
+    theme_minimal() +
+    labs(title = "Top Recommended Books", x = "Book Title", y = "Similarity") +
+    scale_fill_gradient(low = "blue", high = "red") 
+}
+
+# Calling the visualization function
+visualizar_recomendacion(new_user_recommendations)
+```
+
+# **3. MATRIX FACTORIZATION**
+
+Matrix factorization decomposes a large matrix, typically representing user-item interactions (such as ratings), into two smaller matrices: one representing users and the other representing items @kangas2002 . The recosystem package was used for matrix factorization. A new dataset was generated by excluding non-zero ratings, with no additional filtering applied. This approach was chosen because matrix factorization techniques are well-suited to handle large datasets, making it unnecessary to filter further.
+
+```{r echo=FALSE}
+#Creating a dataframe for matrix factorization
+factorization_data <- final_book_df %>% 
+  filter(Book.Rating != 0)
+
+#Splitting the data
+set.seed(123)  # Set a seed for reproducibility
+
+# Splitting the data into 80% training and 20% testing
+train_index <- sample(seq_len(nrow(factorization_data)), size = 0.8 * nrow(factorization_data))
+
+# Create the training and testing datasets
+train_data <- factorization_data[train_index, ]
+test_data <- factorization_data[-train_index, ]
+
+# Ensure the data only contains necessary columns
+train_data <- train_data %>% select(User.ID, ISBN, Book.Rating)
+test_data <- test_data %>% select(User.ID, ISBN, Book.Rating)
+
+# Convert ISBN to numeric factors for both training and testing datasets
+train_data <- train_data %>% mutate(ISBN = as.numeric(as.factor(ISBN)))
+test_data <- test_data %>% mutate(ISBN = as.numeric(as.factor(ISBN)))
+
+# Write the training and testing data to file for recosystem
+write.table(train_data, file = "train_data.txt", sep = " ", row.names = FALSE, col.names = FALSE)
+write.table(test_data, file = "test_data.txt", sep = " ", row.names = FALSE, col.names = FALSE)
+```
+
+## **Training the model**
+
+### **Without Regularization**
+
+The recommendation model was trained using the `recosystem` package without applying regularization. The dataset was used, and the model was set to 20 latent dimensions with a learning rate of 0.1.
+
+```{r echo=FALSE, message=FALSE}
+set.seed(123)
+# Initialize recosystem model without regularization
+reco_without_reg <- Reco()
+
+# Create a data_file object for training
+train_set <- data_file("train_data.txt")
+
+# Train the model without regularization (costp_l1 = 0, costq_l1 = 0)
+reco_without_reg$train(train_set, opts = list(
+  dim = 20,      # Latent dimensions
+  lrate = 0.1,   # Learning rate
+  costp_l1 = 0,  # No regularization for user
+  costq_l1 = 0,  # No regularization for item
+  niter = 20,    # Number of iterations
+  verbose = TRUE # Display progress
+))
+```
+
+### **With Regularization**
+
+The `recosystem` model was trained using regularization to prevent overfitting. Regularization parameters were set at cost_P1=0.1 for users and cost_q1=0.1,for items, striking a balance between fitting the data and maintaining generalization. The latent dimension was set to 20, with a learning rate of 0.1. These regularization values were selected to smooth the model’s predictions and ensure it handles sparse data effectively, avoiding overly specific patterns that may not generalize well to new data.
+
+```{r echo=FALSE, message=FALSE}
+set.seed(123)
+# Initializing recosystem model with regularization
+reco_with_reg <- Reco()
+
+# Creating a data_file object for training
+train_set <- data_file("train_data.txt")
+
+# Training the model with regularization (costp_l1 = 0.1, costq_l1 = 0.1)
+reco_with_reg$train(train_set, opts = list(
+  dim = 20,      # Latent dimensions
+  lrate = 0.1,   # Learning rate
+  costp_l1 = 0.1, # Regularization for user
+  costq_l1 = 0.1, # Regularization for item
+  niter = 20,    # Number of iterations
+  verbose = TRUE # Display progress
+))
+```
+
+## **Model Evaluation**
+
+### **Without Regularization**
+
+The model was tested on a separate test dataset using the model trained without regularization. Predictions were generated and thepredicted ratings were then compared with the actual ratings in the test dataset, and the Root Mean Square Error (RMSE) was computed as 2.305. This RMSE value indicates the accuracy of the model without regularization, highlighting the average prediction error when comparing the predicted and actual ratings.
+
+```{r echo=FALSE, message=FALSE}
+set.seed(123)
+# Creating a data_file object for testing
+test_set <- data_file("test_data.txt")
+
+# Predicting the ratings for the test set using the model trained without regularization
+reco_without_reg$predict(test_set, out_pred = "predictions_test_without_reg.txt")
+
+# Read the predictions
+predictions_without_reg <- read.table("predictions_test_without_reg.txt", header = FALSE)
+
+# Adding the predicted ratings to the test_data for comparison
+test_data$Predicted.Rating_Without_Reg <- predictions_without_reg$V1
+
+# Computing RMSE for the model without regularization
+rmse_without_reg <- sqrt(mean((test_data$Book.Rating - test_data$Predicted.Rating_Without_Reg)^2))
+print(paste("RMSE on the test set without regularization:", rmse_without_reg))
+
+```
+
+### **With Regularization**
+
+The model was tested on the same test dataset but using the version trained with regularization. The predicted ratings were generated and these were compared with the actual ratings in the test dataset. The Root Mean Square Error (RMSE) for this model was computed as 2.307, which is nearly identical to the RMSE without regularization. This shows that regularization had little impact on the prediction accuracy in this case.
+
+```{r echo=FALSE}
+set.seed(123)
+# Creating a data_file object for testing
+test_set <- data_file("test_data.txt")
+
+# Predicting the ratings for the test set using the model trained with regularization
+reco_with_reg$predict(test_set, out_pred = "predictions_test_with_reg.txt")
+
+# Reading the predictions
+predictions_with_reg <- read.table("predictions_test_with_reg.txt", header = FALSE)
+
+# Adding the predicted ratings to the test_data for comparison
+test_data$Predicted.Rating_With_Reg <- predictions_with_reg$V1
+
+# Computing RMSE for the model with regularization
+rmse_with_reg <- sqrt(mean((test_data$Book.Rating - test_data$Predicted.Rating_With_Reg)^2))
+print(paste("RMSE on the test set with regularization:", rmse_with_reg)) 
+```
+
+### **Generating Predictions for Users with and without Regularization**
+
+For User ID 11676, book recommendations were generated using matrix factorization models with and without regularization. Despite applying regularization, the predicted ratings for both models were found to be the same, indicating that regularization had no significant impact on the recommendation results in this case. The top 10 recommended books were identical across both models. For instance, the user 11676 has a high predicted rating for the book "The Five People You Meet in Heaven, 2023", it suggests that based on their preferences and the book's characteristics (from latent factors), they are likely to enjoy this book.
+
+```{r echo=FALSE}
+# Assuming we want to recommend books for User.ID = 11676
+user_id_to_recommend <- 11676
+
+# Converting ISBN columns to character to avoid data type mismatch
+all_books <- filtered_book_df %>% select(ISBN) %>% distinct() %>% mutate(ISBN = as.character(ISBN))
+user_books_rated <- train_data %>% filter(User.ID == user_id_to_recommend) %>% select(ISBN) %>% mutate(ISBN = as.character(ISBN))
+
+# Books not rated by the user
+unrated_books <- all_books %>% anti_join(user_books_rated, by = "ISBN")
+
+# Preparing a data frame for prediction (User ID and the ISBNs of unrated books)
+user_unrated_books <- data.frame(User.ID = user_id_to_recommend, ISBN = unrated_books$ISBN)
+
+# Writing this data to a file for recosystem to predict ratings
+write.table(user_unrated_books, file = "user_unrated_books.txt", sep = " ", row.names = FALSE, col.names = FALSE, quote = FALSE)
+
+# Predicting ratings for the unrated books without regularization
+unrated_set <- data_file("user_unrated_books.txt")
+
+# Predictions without regularization
+reco_without_reg$predict(unrated_set, out_pred = "predictions_unrated_books_without_reg.txt")
+predictions_without_reg <- read.table("predictions_unrated_books_without_reg.txt", header = FALSE)
+
+# Predictions with regularization
+reco_with_reg$predict(unrated_set, out_pred = "predictions_unrated_books_with_reg.txt")
+predictions_with_reg <- read.table("predictions_unrated_books_with_reg.txt", header = FALSE)
+
+# Adding the predicted ratings from both models to the user_unrated_books dataframe
+user_unrated_books$Predicted.Rating_Without_Reg <- predictions_without_reg$V1
+user_unrated_books$Predicted.Rating_With_Reg <- predictions_with_reg$V1
+
+# Merging with the book titles for better visualization
+recommendations <- user_unrated_books %>%
+  left_join(filtered_book_df %>% select(ISBN, Book_Title) %>% distinct(), by = "ISBN")
+
+# Top 10 recommendations without regularization
+top_10_without_reg <- recommendations %>%
+  arrange(desc(Predicted.Rating_Without_Reg)) %>%
+  head(5)
+
+
+# Top 10 recommendations with regularization
+top_10_with_reg <- recommendations %>%
+  arrange(desc(Predicted.Rating_With_Reg)) %>%
+  head(5)
+
+kable(top_10_with_reg, caption = "Matrix Factorization Recommended Books") %>%
+  kable_styling(full_width = FALSE) %>%
+  column_spec(1:ncol(top_10_with_reg), width = "5em", extra_css = "word-wrap: break-word;")
+
+```
+
+# **Final Ensembled Model: Generating Recommendations**
+
+The ensemble model (for existing users ) was constructed by merging user-based, item-based, and matrix factorization recommendations into a single dataframe. Weighted averaging was then used, with assumed assigned weights (User-Based: 0.3, Item-Based: 0.4, Matrix Factorization: 0.3) to compute final ensemble ratings for each book. Item-based recommendations was given a higher weight because they tend to capture item similarities more effectively, which often translates into more relevant and accurate recommendations. Books were ranked according to these ensemble ratings, yielding a prioritized list of top recommendations.
+
+The highest-rated books based on the ensemble model are *The Secret Life of Bees* and *Harry Potter and the Order of the Phoenix*, both with an ensemble rating of 2.7as as shown in the visualization below**.** The ensembled model effectively integrates recommendations from user-based, item-based, and matrix factorization approaches to provide a balanced set of top books for recommendation.
+
+```{r echo=FALSE}
+set.seed(123)
+# Assigning weights for each recommendation system
+weight_user_based <- 0.3
+weight_item_based <- 0.4
+weight_matrix <- 0.3
+
+
+ensemb_user_based <- existing_user_recommendations %>% select(c("ISBN","avg_rating"))
+
+ensemb_matrix_fact <- top_10_with_reg %>% select(c("ISBN","Predicted.Rating_With_Reg"))
+
+ensemb_item_based <- recom_cf_item %>% select(c("ISBN","similarity"))
+
+
+
+```
+
+```{r echo=FALSE}
+
+# Performing the full joins
+merged_recommendations <- full_join(ensemb_user_based, ensemb_item_based, by = "ISBN") %>%
+  full_join(ensemb_matrix_fact, by = "ISBN")
+
+
+merged_recommendations <- merged_recommendations %>%
+  mutate(
+    avg_rating = ifelse(is.na(avg_rating), 0, avg_rating),
+    similarity = ifelse(is.na(similarity), 0, similarity),
+    Predicted.Rating_With_Reg = ifelse(is.na(Predicted.Rating_With_Reg), 0, Predicted.Rating_With_Reg)
+  )
+
+#Applying the ensemble weights
+# Calculating the weighted score for each book
+merged_recommendations <- merged_recommendations %>%
+  mutate(ensemble_rating = (avg_rating * weight_user_based) +
+                           (similarity * weight_item_based) +
+                           (Predicted.Rating_With_Reg * weight_matrix))
+
+```
+
+```{r echo=FALSE}
+# Sorting the books by the ensemble score in descending order
+final_user_11676_recommendations <- merged_recommendations %>%
+  arrange(desc(ensemble_rating)) %>% select(c("ISBN","ensemble_rating")) %>%    arrange(desc(ensemble_rating)) %>%distinct() %>% 
+  head(5) %>% left_join(final_book_df, by="ISBN") %>% filter(User.ID==11676) %>% select(c(1,2,4))
+kable(final_user_11676_recommendations,caption = "Ensembled Model Recommended Books")
+
+
+```
+
+```{r echo=FALSE}
+# Visualizing the recommendations
+visualizar_recomendacion_essembled <- function(data) {
+  ggplot(data, aes(x = reorder(Book_Title, ensemble_rating), y = ensemble_rating, fill = ensemble_rating)) +
+    geom_bar(stat = "identity") +
+    coord_flip() +
+    theme_minimal() +
+    labs(title = "Recommended Books-Ensembled", x = "Book Title", y = "ensemble_rating") +
+    scale_fill_gradient(low = "blue", high = "red") 
+}
+
+# Calling the visualization function
+visualizar_recomendacion_essembled(final_user_11676_recommendations)
+```
+
+## References
